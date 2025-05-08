@@ -1,0 +1,189 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Backpack = LocalPlayer:WaitForChild("Backpack")
+local Leaderstats = LocalPlayer:WaitForChild("leaderstats")
+local ShecklesCount = Leaderstats:WaitForChild("Sheckles")
+local GameEvents = ReplicatedStorage:WaitForChild("GameEvents")
+
+local autoCollect = true
+local SellThreshold = 120
+local IsSelling = false
+local lastMovedTime = tick()
+local MAX_DISTANCE_FROM_PROMPT = 1e5 -- super big range for prompt interaction
+local RETURN_TO_START_DELAY = 15
+local CollectingPaused = false
+
+local startPosition
+local sellPosition = CFrame.new(62, 4, -26)  -- The position where you sell
+
+-- Noclip
+RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if char then
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end
+end)
+
+-- Get player-owned plot
+local function getOwnedPlot()
+    for _, plot in pairs(workspace.Farm:GetChildren()) do
+        local important = plot:FindFirstChild("Important") or plot:FindFirstChild("Importanert")
+        if important then
+            local data = important:FindFirstChild("Data")
+            if data and data:FindFirstChild("Owner") and data.Owner.Value == LocalPlayer.Name then
+                return plot
+            end
+        end
+    end
+    return nil
+end
+
+-- Get closest ProximityPrompt
+local function GetClosestPrompt()
+    local closestPrompt, closestDist = nil, math.huge
+    local plot = getOwnedPlot()
+    if plot then
+        local farm = plot:FindFirstChild("Important"):FindFirstChild("Plants_Physical")
+        if farm then
+            for _, prompt in ipairs(farm:GetDescendants()) do
+                if prompt:IsA("ProximityPrompt") and prompt.Parent:IsA("BasePart") then
+                    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local dist = (prompt.Parent.Position - root.Position).Magnitude
+                        if dist < closestDist then
+                            closestDist = dist
+                            closestPrompt = prompt
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closestPrompt
+end
+
+-- Move character to a target position
+local function MoveToPosition(position)
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        char:PivotTo(CFrame.new(position))
+    end
+end
+
+-- Sell inventory
+local function SellInventory()
+    local Character = LocalPlayer.Character
+    if not Character or IsSelling then return end
+    IsSelling = true
+
+    local Previous = Character:GetPivot()
+    local PreviousSheckles = ShecklesCount.Value
+
+    -- Move character to the selling area
+    Character:PivotTo(sellPosition)
+    task.wait(0.5)
+
+    GameEvents.Sell_Inventory:FireServer()
+
+    -- Wait until sell process completes
+    local timeout = 3
+    local startTime = tick()
+    while tick() - startTime < timeout do
+        if ShecklesCount.Value > PreviousSheckles then
+            break
+        end
+        task.wait(0.2)
+    end
+
+    -- Return to previous position
+    Character:PivotTo(Previous)
+    task.wait(0.2)
+    IsSelling = false
+end
+
+-- Get all crops in inventory
+local function GetInvCrops()
+    local Crops = {}
+    local function CollectFrom(parent)
+        for _, item in parent:GetChildren() do
+            if item:FindFirstChild("Item_String") then
+                table.insert(Crops, item)
+            end
+        end
+    end
+    CollectFrom(Backpack)
+    CollectFrom(LocalPlayer.Character)
+    return Crops
+end
+
+-- Auto-collect logic
+task.spawn(function()
+    startPosition = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) and LocalPlayer.Character.HumanoidRootPart.Position or nil
+
+    while task.wait(0.01) do
+        if autoCollect then
+            local prompt = GetClosestPrompt()
+            if prompt and LocalPlayer.Character then
+                local target = prompt.Parent
+                local root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if root then
+                    -- Move & rotate camera
+                    root.CFrame = CFrame.new(root.Position, target.Position)
+                    Camera.CFrame = CFrame.new(Camera.CFrame.Position, target.Position)
+
+                    -- Move to target
+                    MoveToPosition(target.Position + Vector3.new(0, 1, 0))
+                    lastMovedTime = tick()
+
+                    -- Interact with prompt
+                    prompt.MaxActivationDistance = MAX_DISTANCE_FROM_PROMPT
+                    prompt.Exclusivity = Enum.ProximityPromptExclusivity.AlwaysShow
+                    prompt.RequiresLineOfSight = false
+                    prompt.Enabled = true
+                    fireproximityprompt(prompt, 1, true)
+
+                    -- Check inventory count
+                    local Crops = GetInvCrops()
+                    if #Crops >= 120 and not CollectingPaused then
+                        CollectingPaused = true  -- Pause collecting
+                        task.wait(5)  -- Wait for 5 seconds
+                        SellInventory()  -- Sell items
+                        task.wait(1)  -- Wait for the selling process to complete
+                        CollectingPaused = false  -- Resume collecting
+                    end
+                end
+            end
+
+            -- Return if idle too long
+            if tick() - lastMovedTime > RETURN_TO_START_DELAY and startPosition then
+                MoveToPosition(startPosition + Vector3.new(0, 2, 0))
+                lastMovedTime = tick()
+            end
+        end
+    end
+end)
+
+-- Sell crops every few seconds if needed
+task.spawn(function()
+    while task.wait(2) do
+        local Crops = GetInvCrops()
+        if #Crops >= SellThreshold then
+            SellInventory()
+        end
+    end
+end)
+
+-- Sell crops when new one is added
+Backpack.ChildAdded:Connect(function()
+    local Crops = GetInvCrops()
+    if #Crops >= SellThreshold then
+        SellInventory()
+    end
+end)
